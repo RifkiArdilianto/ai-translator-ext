@@ -2,11 +2,14 @@
   "manifest_version": 3,
   "name": "AI Translator Extc",
   "version": "1.0",
-  "description": "Ekstensi penerjemah dan pembuat ringkasan kursus otomatis berbasis AI.",
+  "description": "Ekstensi penerjemah otomatis transkrip dan video AWS.",
   "permissions": [
     "storage",
     "activeTab",
     "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
   ],
   "action": {
     "default_popup": "popup/popup.html"
@@ -14,7 +17,9 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content.js"]
+      "js": ["content.js"],
+      "all_frames": true,
+      "match_about_blank": true
     }
   ]
 }
