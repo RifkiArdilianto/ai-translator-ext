@@ -1,118 +1,213 @@
-// ===== CORE TRANSLATOR ENGINE (Google Free Endpoint) ===== //
-async function translateText(text, targetLang = 'id') {
-  if (!text || !text.trim()) return text;
-  const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(text)}`;
+// ===== CORE TRANSLATOR VIA BACKGROUND SERVICE WORKER ===== //
+function translateText(text, targetLang = 'id') {
+  return new Promise((resolve) => {
+    if (!text || !text.trim() || text.length < 2) return resolve(text);
+    if (typeof chrome === 'undefined' || !chrome.runtime?.id) return resolve(text);
 
-  try {
-    const response = await fetch(url);
-    const data = await response.json();
-    if (data && data[0]) {
-      let translatedText = '';
-      data[0].forEach(item => { if (item[0]) translatedText += item[0]; });
-      return translatedText;
-    }
-    return text;
-  } catch (err) {
-    return text;
-  }
+    chrome.runtime.sendMessage(
+      { action: 'translate', text: text, targetLang: targetLang },
+      (response) => {
+        if (chrome.runtime.lastError || !response) {
+          resolve(text);
+        } else {
+          resolve(response.translated || text);
+        }
+      }
+    );
+  });
 }
 
-// ===== FITUR 1: AUTO SUBTITLE VIDEO ===== //
+// ===== HELPER: SIMPAN CATATAN KE STORAGE LOKAL ===== //
+function saveNoteToStorage(originalText, translatedText, courseTitle, callback) {
+  chrome.storage.local.get(['saved_notes'], (res) => {
+    const notes = res.saved_notes || [];
+
+    if (notes.some(n => n.original === originalText)) {
+      if (callback) callback(true);
+      return;
+    }
+
+    notes.push({
+      id: Date.now().toString(36),
+      course: courseTitle,
+      original: originalText,
+      translated: translatedText,
+      date: new Date().toLocaleDateString('id-ID')
+    });
+
+    chrome.storage.local.set({ saved_notes: notes }, () => {
+      if (callback) callback(false);
+    });
+  });
+}
+
+// ===== FITUR 1: OVERLAY SUBTITLE VIDEO ===== //
 function getOrCreateSubOverlay() {
   let overlay = document.getElementById('ai-auto-sub-overlay');
   if (!overlay) {
     overlay = document.createElement('div');
     overlay.id = 'ai-auto-sub-overlay';
     overlay.style.cssText = `
-      position: absolute;
-      bottom: 50px;
+      position: fixed;
+      bottom: 70px;
       left: 50%;
       transform: translateX(-50%);
-      background: rgba(15, 23, 42, 0.9);
-      color: #00ffcc;
-      padding: 8px 18px;
+      background: rgba(15, 23, 42, 0.95);
+      color: #38bdf8;
+      padding: 8px 16px;
       border-radius: 8px;
-      font-size: 16px;
+      font-size: 14px;
       font-weight: bold;
       text-align: center;
       z-index: 2147483647;
       max-width: 85%;
-      pointer-events: none;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.6);
-      border: 1px solid #00ffcc;
+      box-shadow: 0 4px 14px rgba(0,0,0,0.7);
+      border: 1px solid #38bdf8;
       font-family: system-ui, -apple-system, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      pointer-events: auto !important;
     `;
-    const container = document.querySelector('.video-js, video, iframe')?.parentElement || document.body;
-    container.style.position = 'relative';
-    container.appendChild(overlay);
+
+    const textSpan = document.createElement('span');
+    textSpan.id = 'ai-sub-text-span';
+    textSpan.style.flexGrow = '1';
+
+    const saveBtn = document.createElement('button');
+    saveBtn.id = 'ai-sub-save-btn';
+    saveBtn.innerText = '💾 Simpan';
+    saveBtn.style.cssText = `
+      padding: 4px 10px;
+      font-size: 11px;
+      background: #0284c7;
+      color: #ffffff;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      white-space: nowrap;
+      font-weight: bold;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+    `;
+
+    overlay.appendChild(textSpan);
+    overlay.appendChild(saveBtn);
+    document.body.appendChild(overlay);
   }
   return overlay;
 }
 
 let lastSubText = '';
 async function processVideoSubtitles() {
-  const subEl = document.querySelector('.vjs-text-track-display, .caption-text, .ytp-caption-segment, [class*="vjs-text-track"]');
+  const subEl = document.querySelector('.vjs-text-track-display, .caption-text, .ytp-caption-segment, [class*="vjs-text-track"], [class*="caption"], [class*="subtitle"]');
+  
   if (subEl) {
     const currentText = subEl.innerText.trim();
     if (currentText && currentText !== lastSubText) {
       lastSubText = currentText;
-      const overlay = getOrCreateSubOverlay();
-      const translated = await translateText(currentText, 'id');
-      overlay.innerText = translated;
-    }
-  }
-}
-
-// ===== FITUR 2: AUTO TRANSLATE PANEL TRANSKRIP & MATERI ===== //
-const translatedNodes = new WeakSet();
-
-async function processPageElements() {
-  const elements = document.querySelectorAll('p, li, span, h1, h2, h3, h4, [class*="transcript"], [class*="cue"]');
-
-  for (let el of elements) {
-    if (!translatedNodes.has(el) && el.children.length === 0 && el.innerText && el.innerText.trim().length > 3) {
-      const originalText = el.innerText.trim();
+      getOrCreateSubOverlay();
       
-      // ABAIKAN jika teks berupa angka/simbol saja
-      if (/^[0-9\s\W]+$/.test(originalText)) continue;
+      const currentTranslatedSub = await translateText(currentText, 'id');
+      const textSpan = document.getElementById('ai-sub-text-span');
+      if (textSpan) textSpan.innerText = currentTranslatedSub;
 
-      translatedNodes.add(el);
-      const translated = await translateText(originalText, 'id');
-      
-      if (translated && translated !== originalText) {
-        el.innerText = translated;
-        el.style.color = '#38bdf8'; // Warna biru penanda teks terjemahan otomatis
+      const saveBtn = document.getElementById('ai-sub-save-btn');
+      if (saveBtn) {
+        saveBtn.innerText = '💾 Simpan';
+        saveBtn.style.background = '#0284c7';
+        
+        saveBtn.onclick = (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          const courseTitle = document.querySelector('h1, h2, #breadcrumbs, [class*="title"]')?.innerText?.replace(/\n/g, ' ')?.trim() || "AWS Video Subtitle";
+          saveNoteToStorage(currentText, currentTranslatedSub, courseTitle, () => {
+            saveBtn.innerText = '✓ Tersimpan';
+            saveBtn.style.background = '#059669';
+          });
+        };
       }
     }
   }
 }
 
-// ===== SYSTEM OBSERVER (DENGAN PENGAMAN CONTEXT EXTENSION) ===== //
-const mainObserver = new MutationObserver(() => {
-  try {
-    // Stop observer otomatis jika context ekstensi terputus / di-reload
-    if (typeof chrome === 'undefined' || !chrome.runtime?.id) {
-      mainObserver.disconnect();
-      return;
+// ===== FITUR 2: TRANSLATE TEKS HALAMAN AMAN (ANTI-CRASH) ===== //
+const processedElements = new WeakSet();
+
+function attachSaveButton(el, originalText, translatedText) {
+  if (el.querySelector('.ai-save-btn')) return;
+
+  const btn = document.createElement('button');
+  btn.className = 'ai-save-btn';
+  btn.innerText = '💾 Simpan';
+  btn.style.cssText = `
+    margin-left: 8px;
+    padding: 2px 6px;
+    font-size: 10px;
+    background: #1e293b;
+    color: #38bdf8;
+    border: 1px solid #38bdf8;
+    border-radius: 4px;
+    cursor: pointer;
+    vertical-align: middle;
+  `;
+
+  btn.onclick = (e) => {
+    e.stopPropagation();
+    const courseTitle = document.querySelector('h1, h2, #breadcrumbs, [class*="title"]')?.innerText?.replace(/\n/g, ' ')?.trim() || "AWS Course Note";
+    saveNoteToStorage(originalText, translatedText, courseTitle, () => {
+      btn.innerText = '✓ Tersimpan';
+      btn.style.background = '#059669';
+      btn.style.color = '#fff';
+    });
+  };
+
+  el.appendChild(btn);
+}
+
+async function processPageTextContent() {
+  // Ditambahkan kembali span dan div agar opsi jawaban ikut diterjemahkan
+  const elements = document.querySelectorAll('p, li, span, div, h1, h2, h3, h4, label, [class*="transcript"], [class*="question"]');
+
+  for (let el of elements) {
+    if (el.closest('#breadcrumbs, #header, #left-side, .ic-app-header, header, nav, .navigation, .menu, button, script, style, #ai-auto-sub-overlay')) continue;
+
+    // KUNCI ANTI-CRASH: el.children.length === 0 memastikan kita HANYA menyentuh teks murni (daun elemen).
+    if (!processedElements.has(el) && el.children.length === 0 && el.textContent && el.textContent.trim().length > 3) {
+      const originalText = el.textContent.trim();
+      
+      if (/^[0-9\s\W]+$/.test(originalText)) continue;
+
+      processedElements.add(el);
+      const translated = await translateText(originalText, 'id');
+      
+      if (translated && translated !== originalText) {
+        el.textContent = translated + ' ';
+        el.style.color = '#38bdf8';
+        attachSaveButton(el, originalText, translated);
+      }
     }
-    processVideoSubtitles();
-    processPageElements();
-  } catch (err) {
-    mainObserver.disconnect();
   }
+}
+
+// ===== SYSTEM RUNNER ===== //
+function runScanner() {
+  try {
+    if (typeof chrome !== 'undefined' && chrome.runtime?.id) {
+      processVideoSubtitles();
+      processPageTextContent();
+    }
+  } catch (err) {}
+}
+
+const mainObserver = new MutationObserver(() => {
+  runScanner();
 });
 
 mainObserver.observe(document.body, {
   childList: true,
-  subtree: true,
-  characterData: true
+  subtree: true
 });
 
-// Pemindaian awal saat halaman selesai dimuat
-document.addEventListener('DOMContentLoaded', () => {
-  try {
-    processPageElements();
-  } catch (err) {
-    // Ignore error jika context berubah saat load
-  }
-});
+setInterval(runScanner, 1200);
+document.addEventListener('DOMContentLoaded', runScanner);
